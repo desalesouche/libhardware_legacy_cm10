@@ -61,6 +61,7 @@
 static struct wpa_ctrl *ctrl_conn[MAX_CONNS];
 static struct wpa_ctrl *monitor_conn[MAX_CONNS];
 
+extern char *read_mac();
 /* socket pair used to exit from a blocking read */
 static int exit_sockets[MAX_CONNS][2];
 
@@ -84,6 +85,11 @@ struct nl_sock *nl_soc;
 struct nl_cache *nl_cache;
 struct genl_family *nl80211;
 #endif
+
+#define WIFI_DRIVER_MODULE_PATH         "/system/lib/modules/wlan.ko"
+#define WIFI_DRIVER_MODULE_NAME         "wlan"
+#define WIFI_EXT_MODULE_PATH 		"/system/lib/modules/librasdioif.ko"
+#define WIFI_EXT_MODULE_NAME 		"librasdioif"
 
 #ifndef WIFI_DRIVER_MODULE_ARG
 #define WIFI_DRIVER_MODULE_ARG          ""
@@ -121,6 +127,8 @@ static const char EXT_MODULE_PATH[] = WIFI_EXT_MODULE_PATH;
 #ifndef WIFI_DRIVER_FW_PATH_PARAM
 #define WIFI_DRIVER_FW_PATH_PARAM	"/sys/module/wlan/parameters/fwpath"
 #endif
+static const char SDIO_POLLING_ON[]     = "/etc/init.qcom.sdio.sh 1";
+static const char SDIO_POLLING_OFF[]    = "/etc/init.qcom.sdio.sh 0";
 
 static const char IFACE_DIR[]           = "/data/system/wpa_supplicant";
 #ifdef WIFI_DRIVER_MODULE_PATH
@@ -134,8 +142,8 @@ static const char FIRMWARE_LOADER[]     = WIFI_FIRMWARE_LOADER;
 static const char DRIVER_PROP_NAME[]    = "wlan.driver.status";
 static const char SUPPLICANT_NAME[]     = "wpa_supplicant";
 static const char SUPP_PROP_NAME[]      = "init.svc.wpa_supplicant";
-static const char P2P_SUPPLICANT_NAME[] = "p2p_supplicant";
-static const char P2P_PROP_NAME[]       = "init.svc.p2p_supplicant";
+static const char P2P_SUPPLICANT_NAME[] = "wpa_supplicant";
+static const char P2P_PROP_NAME[]       = "init.svc.wpa_supplicant";
 static const char SUPP_CONFIG_TEMPLATE[]= "/system/etc/wifi/wpa_supplicant.conf";
 static const char SUPP_CONFIG_FILE[]    = "/data/misc/wifi/wpa_supplicant.conf";
 static const char P2P_CONFIG_FILE[]     = "/data/misc/wifi/p2p_supplicant.conf";
@@ -193,12 +201,26 @@ static int insmod(const char *filename, const char *args)
     void *module;
     unsigned int size;
     int ret;
+    char *x;
+    int  y;
+    char mac_param[64];
+
 
     module = load_file(filename, &size);
     if (!module)
         return -1;
 
-    ret = init_module(module, size, args);
+    if(strstr(filename,"wlan.ko")) {
+        property_get("persist.sys.wifimac",mac_param,"");
+        if(!strcmp(mac_param,"")) {
+		x=read_mac();
+                sprintf(mac_param,"mac_param=%02X:%02X:%02X:%02X:%02X:%02X ",x[5],x[4],x[3],x[2],x[1],x[0]);
+        }
+        ALOGI("Got MAC Address: %s ",mac_param);
+        ret = init_module(module, size, mac_param);
+    } else { 
+        ret = init_module(module, size, args);
+    }
 
     free(module);
 
@@ -301,6 +323,9 @@ int wifi_load_driver()
     if (insmod(DRIVER_MODULE_PATH, module_arg2) < 0) {
 #else
 
+    if(system(SDIO_POLLING_ON))
+        ALOGW("Couldn't turn on SDIO polling: %s", SDIO_POLLING_ON);
+
 #ifdef WIFI_EXT_MODULE_PATH
     if (insmod(EXT_MODULE_PATH, EXT_MODULE_ARG) < 0)
         return -1;
@@ -328,10 +353,13 @@ int wifi_load_driver()
     sched_yield();
     while (count-- > 0) {
         if (property_get(DRIVER_PROP_NAME, driver_status, NULL)) {
-            if (strcmp(driver_status, "ok") == 0)
+            if (strcmp(driver_status, "ok") == 0) {
+		system(SDIO_POLLING_OFF);
                 return 0;
+            }
             else if (strcmp(DRIVER_PROP_NAME, "failed") == 0) {
                 wifi_unload_driver();
+		system(SDIO_POLLING_OFF);
                 return -1;
             }
         }
